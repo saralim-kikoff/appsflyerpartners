@@ -52,6 +52,9 @@ GRANT_APP_IDS = {
 }
 GRANT_EVENT_NAME = "First Time Offer Accepted"
 
+# Agencies to exclude from Grant data
+GRANT_EXCLUDED_AGENCIES = ["mobiprobebd521", "unknown", ""]
+
 BASE_URL = "https://hq1.appsflyer.com/api/raw-data/export/app"
 
 
@@ -933,6 +936,12 @@ def process_grant_app(from_date, to_date):
             delivered_df["agency_normalized"] = delivered_df[agency_col].fillna("unknown").str.strip().str.lower()
         else:
             delivered_df["agency_normalized"] = "unknown"
+        
+        # Filter out excluded agencies
+        before_count = len(delivered_df)
+        delivered_df = delivered_df[~delivered_df["agency_normalized"].isin(GRANT_EXCLUDED_AGENCIES)]
+        delivered_df = delivered_df[delivered_df["agency_normalized"].notna()]
+        print(f"Delivered events after filtering excluded agencies: {len(delivered_df)} (removed {before_count - len(delivered_df)})")
     
     # Normalize fraud_df columns for aggregation
     if not fraud_df.empty:
@@ -946,6 +955,19 @@ def process_grant_app(from_date, to_date):
             fraud_df["agency_normalized"] = fraud_df[agency_col].fillna("unknown").str.strip().str.lower()
         else:
             fraud_df["agency_normalized"] = "unknown"
+        
+        # Filter out excluded agencies
+        before_count = len(fraud_df)
+        fraud_df = fraud_df[~fraud_df["agency_normalized"].isin(GRANT_EXCLUDED_AGENCIES)]
+        fraud_df = fraud_df[fraud_df["agency_normalized"].notna()]
+        print(f"Fraud events after filtering excluded agencies: {len(fraud_df)} (removed {before_count - len(fraud_df)})")
+    
+    # Filter excluded agencies from addl_fraud_df as well
+    if not addl_fraud_df.empty:
+        before_count = len(addl_fraud_df)
+        addl_fraud_df = addl_fraud_df[~addl_fraud_df["agency_normalized"].isin(GRANT_EXCLUDED_AGENCIES)]
+        addl_fraud_df = addl_fraud_df[addl_fraud_df["agency_normalized"].notna()]
+        print(f"Add'l Fraud events after filtering excluded agencies: {len(addl_fraud_df)} (removed {before_count - len(addl_fraud_df)})")
     
     # Aggregate by agency
     print("\n" + "-" * 40)
