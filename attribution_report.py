@@ -73,11 +73,19 @@ def get_previous_month_range():
 
 
 def get_report_month_name():
-    """Get the name of the previous month for report titles."""
+    """Get the name of the previous month for report titles (e.g., 'November 2025')."""
     today = datetime.now()
     first_of_this_month = today.replace(day=1)
     last_of_prev_month = first_of_this_month - timedelta(days=1)
     return last_of_prev_month.strftime("%B %Y")
+
+
+def get_report_month_yyyymm():
+    """Get the previous month in YYYYMM format for filenames (e.g., '202511')."""
+    today = datetime.now()
+    first_of_this_month = today.replace(day=1)
+    last_of_prev_month = first_of_this_month - timedelta(days=1)
+    return last_of_prev_month.strftime("%Y%m")
 
 
 # =============================================================================
@@ -1034,7 +1042,8 @@ def generate_kikoff_excel_report(kikoff_data, report_month):
     add_dataframe_to_sheet(ws, kikoff_data["flagged"])
     
     # Save workbook
-    filename = f"kikoff_partner_report_{report_month.replace(' ', '_').lower()}.xlsx"
+    month_yyyymm = get_report_month_yyyymm()
+    filename = f"Appsflyer_Kikoff_{month_yyyymm}.xlsx"
     filepath = f"/tmp/{filename}"
     wb.save(filepath)
     
@@ -1074,7 +1083,8 @@ def generate_grant_excel_report(grant_data, report_month):
     add_dataframe_to_sheet(ws, grant_data["flagged"])
     
     # Save workbook
-    filename = f"grant_partner_report_{report_month.replace(' ', '_').lower()}.xlsx"
+    month_yyyymm = get_report_month_yyyymm()
+    filename = f"Appsflyer_Grant_{month_yyyymm}.xlsx"
     filepath = f"/tmp/{filename}"
     wb.save(filepath)
     
