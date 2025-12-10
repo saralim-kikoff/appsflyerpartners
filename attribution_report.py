@@ -451,39 +451,93 @@ def generate_excel_report(summary_df, delivered_df, fraud_df, outside_attr_df, r
 # SLACK NOTIFICATION
 # =============================================================================
 
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
+SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID")
+
+
+def upload_file_to_slack(filepath, channel_id, initial_comment=""):
+    """
+    Upload a file to Slack using the Bot Token.
+    Returns the file permalink if successful, None otherwise.
+    """
+    if not SLACK_BOT_TOKEN or not channel_id:
+        return None
+    
+    url = "https://slack.com/api/files.upload"
+    
+    headers = {
+        "Authorization": f"Bearer {SLACK_BOT_TOKEN}"
+    }
+    
+    with open(filepath, "rb") as f:
+        response = requests.post(
+            url,
+            headers=headers,
+            data={
+                "channels": channel_id,
+                "initial_comment": initial_comment,
+                "filename": os.path.basename(filepath),
+                "title": os.path.basename(filepath)
+            },
+            files={"file": f}
+        )
+    
+    if response.status_code == 200:
+        result = response.json()
+        if result.get("ok"):
+            permalink = result.get("file", {}).get("permalink", "")
+            print(f"File uploaded to Slack successfully: {permalink}")
+            return permalink
+        else:
+            print(f"Slack file upload failed: {result.get('error')}")
+    else:
+        print(f"Slack file upload failed: {response.status_code}")
+    
+    return None
+
+
 def send_slack_notification(summary_df, report_month, excel_filepath):
     """
     Send Slack message with report summary.
     
-    Note: Slack webhooks don't support file uploads directly.
-    For file uploads, you'd need the Slack API with files.upload.
-    This sends a formatted summary message.
+    If SLACK_BOT_TOKEN and SLACK_CHANNEL_ID are set, uploads the Excel file directly.
+    Otherwise, falls back to webhook with GitHub Actions artifact link.
     """
-    if not SLACK_WEBHOOK_URL:
-        print("Slack webhook URL not configured. Skipping notification.")
+    # Try file upload first if bot token is configured
+    file_permalink = None
+    if SLACK_BOT_TOKEN and SLACK_CHANNEL_ID and excel_filepath:
+        file_permalink = upload_file_to_slack(
+            excel_filepath, 
+            SLACK_CHANNEL_ID,
+            initial_comment=""  # We'll send the summary separately
+        )
+    
+    # Build the summary message
+    if not SLACK_WEBHOOK_URL and not SLACK_BOT_TOKEN:
+        print("No Slack credentials configured. Skipping notification.")
         return
     
     # Handle empty data case
     if summary_df.empty:
-        message = {
-            "blocks": [
-                {
-                    "type": "header",
-                    "text": {
-                        "type": "plain_text",
-                        "text": f"📊 Monthly Attribution Report — {report_month}",
-                        "emoji": True
-                    }
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "⚠️ *No data found for this period.*\n\nThis could mean:\n• No events matched the criteria\n• API permissions issue\n• Event name mismatch"
-                    }
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"📊 Monthly AppsFlyer Partner Report — {report_month}",
+                    "emoji": True
                 }
-            ]
-        }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "⚠️ *No data found for this period.*\n\nThis could mean:\n• No events matched the criteria\n• API permissions issue\n• Event name mismatch"
+                }
+            }
+        ]
+        
+        message = {"blocks": blocks}
     else:
         # Build summary table
         total_delivered = int(summary_df["delivered"].sum()) if "delivered" in summary_df.columns else 0
@@ -507,48 +561,75 @@ def send_slack_notification(summary_df, report_month, excel_filepath):
         
         agency_summary = "\n".join(agency_lines) if agency_lines else "No data"
         
-        message = {
-            "blocks": [
-                {
-                    "type": "header",
-                    "text": {
-                        "type": "plain_text",
-                        "text": f"📊 Monthly Attribution Report — {report_month}",
-                        "emoji": True
-                    }
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*Overall Totals*\n"
-                                f"• Delivered Events: *{total_delivered:,}*\n"
-                                f"• Fraud Events (P360): *{total_fraud:,}* ({overall_fraud_rate:.1f}%)\n"
-                                f"• Outside Attribution Events: *{total_outside_attr:,}* ({overall_outside_attr_rate:.1f}%)\n"
-                                f"• Net Valid Events: *{total_net_valid:,}*"
-                    }
-                },
-                {
-                    "type": "divider"
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*Top Agencies by Net Valid*\n{agency_summary}"
-                    }
-                },
-                {
-                    "type": "context",
-                    "elements": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"Event: `{EVENT_NAME}` | Full Excel report generated"
-                        }
-                    ]
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"📊 Monthly AppsFlyer Partner Report — {report_month}",
+                    "emoji": True
                 }
-            ]
-        }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Overall Totals*\n"
+                            f"• Delivered Events: *{total_delivered:,}*\n"
+                            f"• Fraud Events (P360): *{total_fraud:,}* ({overall_fraud_rate:.1f}%)\n"
+                            f"• Outside Attribution Events: *{total_outside_attr:,}* ({overall_outside_attr_rate:.1f}%)\n"
+                            f"• Net Valid Events: *{total_net_valid:,}*"
+                }
+            },
+            {
+                "type": "divider"
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Top Agencies by Net Valid*\n{agency_summary}"
+                }
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"Event: `{EVENT_NAME}`"
+                    }
+                ]
+            }
+        ]
+        
+        # Add download link
+        if file_permalink:
+            # File was uploaded to Slack - link to it
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"📎 <{file_permalink}|Download Full Report>"
+                }
+            })
+        else:
+            # Fall back to GitHub Actions artifact link
+            github_repo = os.environ.get("GITHUB_REPOSITORY", "")
+            github_run_id = os.environ.get("GITHUB_RUN_ID", "")
+            
+            if github_repo and github_run_id:
+                artifact_url = f"https://github.com/{github_repo}/actions/runs/{github_run_id}"
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"📎 <{artifact_url}|Download Full Report> (requires GitHub access)"
+                    }
+                })
+        
+        message = {"blocks": blocks}
+        
+        message = {"blocks": blocks}
     
     response = requests.post(
         SLACK_WEBHOOK_URL,
