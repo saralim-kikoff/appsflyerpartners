@@ -44,9 +44,9 @@ jobs:
         run: |
           python attribution_report.py
       
-      - name: Upload report artifact
+      - name: Upload report artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: attribution-report
-          path: /tmp/attribution_report_*.xlsx
+          name: attribution-reports
+          path: /tmp/Appsflyer_*.xlsx
           retention-days: 90
