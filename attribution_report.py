@@ -113,22 +113,17 @@ def pull_appsflyer_report(app_id, report_type, from_date, to_date):
     Returns:
         pandas DataFrame with report data
     """
-    # Map report type to endpoint - trying multiple P360 endpoint formats
+    # Map report type to endpoint
     endpoint_map = {
         "in_app_events": "in_app_events_report/v5",
-        "protect360_in_app_events": "protect360/in_app_events/v5"
+        "protect360_in_app_events": "fraud-post-inapps/v5"
     }
-    
-    # Alternative P360 endpoints to try
-    p360_endpoints = [
-        "protect360/in_app_events/v5",
-        "protect360_fraud/in_app_events_report/v5",
-        "fraud/in_app_events_report/v5"
-    ]
     
     endpoint = endpoint_map.get(report_type)
     if not endpoint:
         raise ValueError(f"Unknown report type: {report_type}")
+    
+    url = f"{BASE_URL}/{app_id}/{endpoint}"
     
     headers = {
         "Authorization": f"Bearer {APPSFLYER_API_TOKEN}",
@@ -141,33 +136,6 @@ def pull_appsflyer_report(app_id, report_type, from_date, to_date):
         "event_name": EVENT_NAME
     }
     
-    # For P360, try multiple endpoints
-    if report_type == "protect360_in_app_events":
-        for p360_endpoint in p360_endpoints:
-            url = f"{BASE_URL}/{app_id}/{p360_endpoint}"
-            print(f"Pulling {report_type} for {app_id}...")
-            print(f"  URL: {url}")
-            print(f"  Date range: {from_date} to {to_date}")
-            
-            response = requests.get(url, headers=headers, params=params)
-            
-            if response.status_code == 200:
-                if response.text.strip():
-                    df = pd.read_csv(StringIO(response.text))
-                    print(f"  Pulled {len(df)} rows")
-                    return df
-                else:
-                    print("  No data returned")
-                    return pd.DataFrame()
-            else:
-                print(f"  Endpoint returned {response.status_code}, trying next...")
-        
-        print(f"  All P360 endpoints failed for {app_id}")
-        return pd.DataFrame()
-    
-    # Standard endpoint for in-app events
-    url = f"{BASE_URL}/{app_id}/{endpoint}"
-    
     print(f"Pulling {report_type} for {app_id}...")
     print(f"  URL: {url}")
     print(f"  Date range: {from_date} to {to_date}")
@@ -176,14 +144,14 @@ def pull_appsflyer_report(app_id, report_type, from_date, to_date):
     
     if response.status_code != 200:
         print(f"  Error: {response.status_code}")
-        print(f"  Response: {response.text[:500]}")
+        print(f"  Response: {response.text[:500] if response.text else 'Empty'}")
         return pd.DataFrame()
     
     if not response.text.strip():
         print("  No data returned")
         return pd.DataFrame()
     
-    df = pd.read_csv(StringIO(response.text))
+    df = pd.read_csv(StringIO(response.text), low_memory=False)
     print(f"  Pulled {len(df)} rows")
     
     return df
@@ -399,12 +367,13 @@ def add_dataframe_to_sheet(ws, df, start_row=1):
             cell.alignment = Alignment(horizontal="center")
     
     # Auto-adjust column widths
+    from openpyxl.utils import get_column_letter
     for col_idx, col_name in enumerate(df.columns, 1):
         max_length = max(
             len(str(col_name)),
             df[col_name].astype(str).str.len().max() if len(df) > 0 else 0
         )
-        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = max_length + 2
+        ws.column_dimensions[get_column_letter(col_idx)].width = max_length + 2
 
 
 def generate_excel_report(summary_df, delivered_df, fraud_df, flagged_df, report_month):
