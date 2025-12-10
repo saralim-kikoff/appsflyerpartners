@@ -363,7 +363,8 @@ def add_dataframe_to_sheet(ws, df, start_row=1):
     
     # Write headers
     for col_idx, col_name in enumerate(df.columns, 1):
-        ws.cell(row=start_row, column=col_idx, value=col_name.replace("_", " ").title())
+        header_text = str(col_name).replace("_", " ").title()
+        ws.cell(row=start_row, column=col_idx, value=header_text)
     
     style_header(ws, start_row, len(df.columns))
     
@@ -376,11 +377,20 @@ def add_dataframe_to_sheet(ws, df, start_row=1):
     # Auto-adjust column widths
     from openpyxl.utils import get_column_letter
     for col_idx, col_name in enumerate(df.columns, 1):
-        max_length = max(
-            len(str(col_name)),
-            df[col_name].astype(str).str.len().max() if len(df) > 0 else 0
-        )
-        ws.column_dimensions[get_column_letter(col_idx)].width = max_length + 2
+        try:
+            # Get max length of header
+            header_len = len(str(col_name))
+            # Get max length of data in column (using iloc for safer access)
+            if len(df) > 0:
+                data_len = df.iloc[:, col_idx - 1].astype(str).str.len().max()
+            else:
+                data_len = 0
+            max_length = max(header_len, data_len)
+            # Cap width at 50 to avoid extremely wide columns
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max_length + 2, 50)
+        except Exception:
+            # Default width if calculation fails
+            ws.column_dimensions[get_column_letter(col_idx)].width = 15
 
 
 def generate_excel_report(summary_df, delivered_df, fraud_df, outside_attr_df, report_month):
