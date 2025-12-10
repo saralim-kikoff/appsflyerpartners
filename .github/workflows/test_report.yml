@@ -1,0 +1,47 @@
+name: Test Attribution Report
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_date:
+        description: 'Override start date (YYYY-MM-DD). Leave empty for previous month.'
+        required: false
+        type: string
+      to_date:
+        description: 'Override end date (YYYY-MM-DD). Leave empty for previous month.'
+        required: false
+        type: string
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run attribution report (test mode)
+        env:
+          APPSFLYER_API_TOKEN: ${{ secrets.APPSFLYER_API_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          python attribution_report.py
+      
+      - name: Upload report artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: attribution-reports-test
+          path: /tmp/Appsflyer_*.xlsx
+          retention-days: 90
