@@ -304,6 +304,7 @@ def apply_flagging_rules(df):
 def aggregate_by_agency(df, value_col_name="event_count"):
     """
     Aggregate event counts by agency.
+    Excludes 'unknown' agency from aggregations.
     
     Returns:
         DataFrame with agency and event count
@@ -325,7 +326,13 @@ def aggregate_by_agency(df, value_col_name="event_count"):
         else:
             df["agency_normalized"] = "unknown"
     
-    aggregated = df.groupby("agency_normalized").size().reset_index(name=value_col_name)
+    # Filter out unknown agencies
+    df_filtered = df[df["agency_normalized"] != "unknown"]
+    
+    if df_filtered.empty:
+        return pd.DataFrame(columns=["agency", value_col_name])
+    
+    aggregated = df_filtered.groupby("agency_normalized").size().reset_index(name=value_col_name)
     aggregated = aggregated.rename(columns={"agency_normalized": "agency"})
     aggregated = aggregated.sort_values(value_col_name, ascending=False)
     
@@ -376,39 +383,50 @@ def add_dataframe_to_sheet(ws, df, start_row=1):
         ws.column_dimensions[get_column_letter(col_idx)].width = max_length + 2
 
 
-def generate_excel_report(summary_df, delivered_df, fraud_df, flagged_df, report_month):
+def generate_excel_report(summary_df, delivered_df, fraud_df, outside_attr_df, report_month):
     """
     Generate Excel workbook with multiple tabs.
     
     Tabs:
     1. Summary - Agency rollup with Net Valid calculation
-    2. Delivered Events - All events aggregated by agency
-    3. Fraud Events - P360 events aggregated by agency
-    4. Flagged Events - Rule violations aggregated by agency
+    2. Delivered Events - Raw event data
+    3. Fraud Events - Raw P360 event data
+    4. Outside Attribution Events - Raw flagged event data
     """
     wb = Workbook()
     
     # Remove default sheet
     wb.remove(wb.active)
     
+    # Reorder summary columns to put net_valid last
+    if not summary_df.empty:
+        # Define desired column order
+        desired_order = ["agency", "delivered", "fraud", "fraud_rate_%", "outside_attribution", "outside_attr_rate_%", "net_valid"]
+        # Only include columns that exist
+        final_order = [col for col in desired_order if col in summary_df.columns]
+        # Add any remaining columns not in the desired order
+        remaining = [col for col in summary_df.columns if col not in final_order]
+        final_order.extend(remaining)
+        summary_df = summary_df[final_order]
+    
     # Tab 1: Summary
     ws_summary = wb.create_sheet("Summary")
     ws_summary.cell(row=1, column=1, value=f"Attribution Report - {report_month}")
     ws_summary.cell(row=1, column=1).font = Font(bold=True, size=14)
-    ws_summary.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6)
+    ws_summary.merge_cells(start_row=1, start_column=1, end_row=1, end_column=7)
     add_dataframe_to_sheet(ws_summary, summary_df, start_row=3)
     
-    # Tab 2: Delivered Events
+    # Tab 2: Delivered Events (raw data)
     ws_delivered = wb.create_sheet("Delivered Events")
     add_dataframe_to_sheet(ws_delivered, delivered_df)
     
-    # Tab 3: Fraud Events
+    # Tab 3: Fraud Events (raw data)
     ws_fraud = wb.create_sheet("Fraud Events")
     add_dataframe_to_sheet(ws_fraud, fraud_df)
     
-    # Tab 4: Flagged Events
-    ws_flagged = wb.create_sheet("Flagged Events")
-    add_dataframe_to_sheet(ws_flagged, flagged_df)
+    # Tab 4: Outside Attribution Events (raw data)
+    ws_outside_attr = wb.create_sheet("Outside Attribution Events")
+    add_dataframe_to_sheet(ws_outside_attr, outside_attr_df)
     
     # Save workbook
     filename = f"attribution_report_{report_month.replace(' ', '_').lower()}.xlsx"
@@ -460,11 +478,11 @@ def send_slack_notification(summary_df, report_month, excel_filepath):
         # Build summary table
         total_delivered = int(summary_df["delivered"].sum()) if "delivered" in summary_df.columns else 0
         total_fraud = int(summary_df["fraud"].sum()) if "fraud" in summary_df.columns else 0
-        total_flagged = int(summary_df["flagged"].sum()) if "flagged" in summary_df.columns else 0
+        total_outside_attr = int(summary_df["outside_attribution"].sum()) if "outside_attribution" in summary_df.columns else 0
         total_net_valid = int(summary_df["net_valid"].sum()) if "net_valid" in summary_df.columns else 0
         
         overall_fraud_rate = (total_fraud / total_delivered * 100) if total_delivered > 0 else 0
-        overall_flag_rate = (total_flagged / total_delivered * 100) if total_delivered > 0 else 0
+        overall_outside_attr_rate = (total_outside_attr / total_delivered * 100) if total_delivered > 0 else 0
         
         # Top agencies by net valid
         top_agencies = summary_df.head(5).to_dict('records') if not summary_df.empty else []
@@ -496,7 +514,7 @@ def send_slack_notification(summary_df, report_month, excel_filepath):
                         "text": f"*Overall Totals*\n"
                                 f"• Delivered Events: *{total_delivered:,}*\n"
                                 f"• Fraud Events (P360): *{total_fraud:,}* ({overall_fraud_rate:.1f}%)\n"
-                                f"• Flagged Events: *{total_flagged:,}* ({overall_flag_rate:.1f}%)\n"
+                                f"• Outside Attribution Events: *{total_outside_attr:,}* ({overall_outside_attr_rate:.1f}%)\n"
                                 f"• Net Valid Events: *{total_net_valid:,}*"
                     }
                 },
@@ -574,7 +592,49 @@ def main():
     else:
         flagged_events_df = pd.DataFrame()
     
-    print(f"Flagged events: {len(flagged_events_df)}")
+    print(f"Outside attribution events (before dedup): {len(flagged_events_df)}")
+    
+    # Remove outside attribution events that are already in P360 fraud data
+    # Match on Customer ID and AppsFlyer ID
+    if not flagged_events_df.empty and not fraud_df.empty:
+        # Normalize column names for both dataframes
+        flagged_events_df.columns = flagged_events_df.columns.str.strip().str.lower().str.replace(' ', '_')
+        fraud_df.columns = fraud_df.columns.str.strip().str.lower().str.replace(' ', '_')
+        
+        # Find the customer_id and appsflyer_id columns
+        customer_id_col = None
+        appsflyer_id_col = None
+        
+        for col in flagged_events_df.columns:
+            if 'customer' in col and 'id' in col:
+                customer_id_col = col
+            if 'appsflyer' in col and 'id' in col:
+                appsflyer_id_col = col
+        
+        if customer_id_col and appsflyer_id_col:
+            # Create composite key for matching
+            flagged_events_df["_match_key"] = (
+                flagged_events_df[customer_id_col].astype(str) + "_" + 
+                flagged_events_df[appsflyer_id_col].astype(str)
+            )
+            fraud_df["_match_key"] = (
+                fraud_df[customer_id_col].astype(str) + "_" + 
+                fraud_df[appsflyer_id_col].astype(str)
+            )
+            
+            # Remove flagged events that exist in fraud data
+            fraud_keys = set(fraud_df["_match_key"].unique())
+            flagged_events_df = flagged_events_df[~flagged_events_df["_match_key"].isin(fraud_keys)]
+            
+            # Clean up temp column
+            flagged_events_df = flagged_events_df.drop(columns=["_match_key"])
+            fraud_df = fraud_df.drop(columns=["_match_key"])
+            
+            print(f"Outside attribution events (after dedup): {len(flagged_events_df)}")
+        else:
+            print("Warning: Could not find Customer ID or AppsFlyer ID columns for deduplication")
+    
+    print(f"Outside attribution events: {len(flagged_events_df)}")
     
     # Aggregate by agency
     print("\n" + "-" * 40)
@@ -583,7 +643,7 @@ def main():
     
     delivered_agg = aggregate_by_agency(delivered_df, "delivered")
     fraud_agg = aggregate_by_agency(fraud_df, "fraud")
-    flagged_agg = aggregate_by_agency(flagged_events_df, "flagged")
+    flagged_agg = aggregate_by_agency(flagged_events_df, "outside_attribution")
     
     # Add flag reason breakdown to flagged aggregation
     if not flagged_events_df.empty and "flag_reason" in flagged_events_df.columns:
@@ -597,7 +657,7 @@ def main():
     
     # Build summary - handle empty dataframes
     if delivered_agg.empty:
-        summary_df = pd.DataFrame(columns=["agency", "delivered", "fraud", "flagged", "net_valid", "fraud_rate_%", "flag_rate_%"])
+        summary_df = pd.DataFrame(columns=["agency", "delivered", "fraud", "outside_attribution", "net_valid", "fraud_rate_%", "outside_attr_rate_%"])
     else:
         summary_df = delivered_agg.copy()
         
@@ -607,20 +667,20 @@ def main():
             summary_df["fraud"] = 0
             
         if not flagged_agg.empty:
-            summary_df = summary_df.merge(flagged_agg[["agency", "flagged"]], on="agency", how="left")
+            summary_df = summary_df.merge(flagged_agg[["agency", "outside_attribution"]], on="agency", how="left")
         else:
-            summary_df["flagged"] = 0
+            summary_df["outside_attribution"] = 0
         
         summary_df = summary_df.fillna(0)
         
         # Ensure numeric types
-        for col in ["delivered", "fraud", "flagged"]:
+        for col in ["delivered", "fraud", "outside_attribution"]:
             if col in summary_df.columns:
                 summary_df[col] = pd.to_numeric(summary_df[col], errors='coerce').fillna(0)
         
         # Calculate net valid
         summary_df["net_valid"] = (
-            summary_df["delivered"] - summary_df["fraud"] - summary_df["flagged"]
+            summary_df["delivered"] - summary_df["fraud"] - summary_df["outside_attribution"]
         ).astype(int)
         
         # Calculate rates safely
@@ -628,13 +688,13 @@ def main():
             lambda row: round(row["fraud"] / row["delivered"] * 100, 1) if row["delivered"] > 0 else 0,
             axis=1
         )
-        summary_df["flag_rate_%"] = summary_df.apply(
-            lambda row: round(row["flagged"] / row["delivered"] * 100, 1) if row["delivered"] > 0 else 0,
+        summary_df["outside_attr_rate_%"] = summary_df.apply(
+            lambda row: round(row["outside_attribution"] / row["delivered"] * 100, 1) if row["delivered"] > 0 else 0,
             axis=1
         )
         
         # Convert to int for cleaner display
-        for col in ["delivered", "fraud", "flagged", "net_valid"]:
+        for col in ["delivered", "fraud", "outside_attribution", "net_valid"]:
             if col in summary_df.columns:
                 summary_df[col] = summary_df[col].astype(int)
         
@@ -654,9 +714,9 @@ def main():
     
     excel_filepath = generate_excel_report(
         summary_df,
-        delivered_agg,
-        fraud_agg,
-        flagged_agg,
+        delivered_df,  # Raw data for Delivered Events tab
+        fraud_df,      # Raw data for Fraud Events tab
+        flagged_events_df,  # Raw data for Outside Attribution Events tab
         report_month
     )
     
