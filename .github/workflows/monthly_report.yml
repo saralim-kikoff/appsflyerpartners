@@ -50,32 +50,3 @@ jobs:
           name: attribution-report
           path: /tmp/attribution_report_*.xlsx
           retention-days: 90
-```
-
----
-
-## Step 2: Add GitHub Secrets
-
-1. Go to your repo on GitHub
-2. **Settings** → **Secrets and variables** → **Actions**
-3. Click **New repository secret**
-4. Add these two:
-
-| Name | Value |
-|------|-------|
-| `APPSFLYER_API_TOKEN` | Your regenerated AppsFlyer API token |
-| `SLACK_WEBHOOK_URL` | Your regenerated Slack webhook URL |
-
----
-
-## Step 3: Verify folder structure
-
-Your repo should look like:
-```
-your-repo/
-├── .github/
-│   └── workflows/
-│       └── monthly_report.yml
-├── src/
-│   └── attribution_report.py
-└── requirements.txt
