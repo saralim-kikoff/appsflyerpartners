@@ -38,7 +38,7 @@ jobs:
           APPSFLYER_API_TOKEN: ${{ secrets.APPSFLYER_API_TOKEN }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          python src/attribution_report.py
+          python attribution_report.py
       
       - name: Upload report artifact
         uses: actions/upload-artifact@v4
