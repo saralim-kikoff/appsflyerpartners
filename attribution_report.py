@@ -113,17 +113,22 @@ def pull_appsflyer_report(app_id, report_type, from_date, to_date):
     Returns:
         pandas DataFrame with report data
     """
-    # Map report type to endpoint
+    # Map report type to endpoint - trying multiple P360 endpoint formats
     endpoint_map = {
         "in_app_events": "in_app_events_report/v5",
-        "protect360_in_app_events": "protect360_fraud/in_app_events_report/v5"
+        "protect360_in_app_events": "protect360/in_app_events/v5"
     }
+    
+    # Alternative P360 endpoints to try
+    p360_endpoints = [
+        "protect360/in_app_events/v5",
+        "protect360_fraud/in_app_events_report/v5",
+        "fraud/in_app_events_report/v5"
+    ]
     
     endpoint = endpoint_map.get(report_type)
     if not endpoint:
         raise ValueError(f"Unknown report type: {report_type}")
-    
-    url = f"{BASE_URL}/{app_id}/{endpoint}"
     
     headers = {
         "Authorization": f"Bearer {APPSFLYER_API_TOKEN}",
@@ -133,9 +138,35 @@ def pull_appsflyer_report(app_id, report_type, from_date, to_date):
     params = {
         "from": from_date,
         "to": to_date,
-        "event_name": EVENT_NAME,
-        "media_source": "!organic"  # Non-organic only
+        "event_name": EVENT_NAME
     }
+    
+    # For P360, try multiple endpoints
+    if report_type == "protect360_in_app_events":
+        for p360_endpoint in p360_endpoints:
+            url = f"{BASE_URL}/{app_id}/{p360_endpoint}"
+            print(f"Pulling {report_type} for {app_id}...")
+            print(f"  URL: {url}")
+            print(f"  Date range: {from_date} to {to_date}")
+            
+            response = requests.get(url, headers=headers, params=params)
+            
+            if response.status_code == 200:
+                if response.text.strip():
+                    df = pd.read_csv(StringIO(response.text))
+                    print(f"  Pulled {len(df)} rows")
+                    return df
+                else:
+                    print("  No data returned")
+                    return pd.DataFrame()
+            else:
+                print(f"  Endpoint returned {response.status_code}, trying next...")
+        
+        print(f"  All P360 endpoints failed for {app_id}")
+        return pd.DataFrame()
+    
+    # Standard endpoint for in-app events
+    url = f"{BASE_URL}/{app_id}/{endpoint}"
     
     print(f"Pulling {report_type} for {app_id}...")
     print(f"  URL: {url}")
@@ -183,6 +214,19 @@ def pull_all_reports(from_date, to_date):
     
     delivered_df = pd.concat(delivered_dfs, ignore_index=True) if delivered_dfs else pd.DataFrame()
     fraud_df = pd.concat(fraud_dfs, ignore_index=True) if fraud_dfs else pd.DataFrame()
+    
+    # Filter out organic events (non-organic only)
+    if not delivered_df.empty:
+        delivered_df.columns = delivered_df.columns.str.strip().str.lower().str.replace(' ', '_')
+        if 'media_source' in delivered_df.columns:
+            delivered_df = delivered_df[delivered_df['media_source'].str.lower() != 'organic']
+            print(f"After filtering organic: {len(delivered_df)} delivered events")
+    
+    if not fraud_df.empty:
+        fraud_df.columns = fraud_df.columns.str.strip().str.lower().str.replace(' ', '_')
+        if 'media_source' in fraud_df.columns:
+            fraud_df = fraud_df[fraud_df['media_source'].str.lower() != 'organic']
+            print(f"After filtering organic: {len(fraud_df)} fraud events")
     
     return delivered_df, fraud_df
 
@@ -422,70 +466,92 @@ def send_slack_notification(summary_df, report_month, excel_filepath):
         print("Slack webhook URL not configured. Skipping notification.")
         return
     
-    # Build summary table
-    total_delivered = summary_df["delivered"].sum() if "delivered" in summary_df.columns else 0
-    total_fraud = summary_df["fraud"].sum() if "fraud" in summary_df.columns else 0
-    total_flagged = summary_df["flagged"].sum() if "flagged" in summary_df.columns else 0
-    total_net_valid = summary_df["net_valid"].sum() if "net_valid" in summary_df.columns else 0
-    
-    overall_fraud_rate = (total_fraud / total_delivered * 100) if total_delivered > 0 else 0
-    overall_flag_rate = (total_flagged / total_delivered * 100) if total_delivered > 0 else 0
-    
-    # Top agencies by net valid
-    top_agencies = summary_df.head(5).to_dict('records') if not summary_df.empty else []
-    
-    agency_lines = []
-    for agency in top_agencies:
-        name = agency.get("agency", "Unknown")
-        delivered = agency.get("delivered", 0)
-        net_valid = agency.get("net_valid", 0)
-        fraud_rate = agency.get("fraud_rate_%", 0)
-        agency_lines.append(f"• *{name}*: {net_valid:,} net valid / {delivered:,} delivered ({fraud_rate:.1f}% fraud)")
-    
-    agency_summary = "\n".join(agency_lines) if agency_lines else "No data"
-    
-    message = {
-        "blocks": [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": f"📊 Monthly Attribution Report — {report_month}",
-                    "emoji": True
-                }
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*Overall Totals*\n"
-                            f"• Delivered Events: *{total_delivered:,}*\n"
-                            f"• Fraud Events (P360): *{total_fraud:,}* ({overall_fraud_rate:.1f}%)\n"
-                            f"• Flagged Events: *{total_flagged:,}* ({overall_flag_rate:.1f}%)\n"
-                            f"• Net Valid Events: *{total_net_valid:,}*"
-                }
-            },
-            {
-                "type": "divider"
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*Top Agencies by Net Valid*\n{agency_summary}"
-                }
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"Event: `{EVENT_NAME}` | Full Excel report generated"
+    # Handle empty data case
+    if summary_df.empty:
+        message = {
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"📊 Monthly Attribution Report — {report_month}",
+                        "emoji": True
                     }
-                ]
-            }
-        ]
-    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "⚠️ *No data found for this period.*\n\nThis could mean:\n• No events matched the criteria\n• API permissions issue\n• Event name mismatch"
+                    }
+                }
+            ]
+        }
+    else:
+        # Build summary table
+        total_delivered = int(summary_df["delivered"].sum()) if "delivered" in summary_df.columns else 0
+        total_fraud = int(summary_df["fraud"].sum()) if "fraud" in summary_df.columns else 0
+        total_flagged = int(summary_df["flagged"].sum()) if "flagged" in summary_df.columns else 0
+        total_net_valid = int(summary_df["net_valid"].sum()) if "net_valid" in summary_df.columns else 0
+        
+        overall_fraud_rate = (total_fraud / total_delivered * 100) if total_delivered > 0 else 0
+        overall_flag_rate = (total_flagged / total_delivered * 100) if total_delivered > 0 else 0
+        
+        # Top agencies by net valid
+        top_agencies = summary_df.head(5).to_dict('records') if not summary_df.empty else []
+        
+        agency_lines = []
+        for agency in top_agencies:
+            name = agency.get("agency", "Unknown")
+            delivered = int(agency.get("delivered", 0))
+            net_valid = int(agency.get("net_valid", 0))
+            fraud_rate = float(agency.get("fraud_rate_%", 0))
+            agency_lines.append(f"• *{name}*: {net_valid:,} net valid / {delivered:,} delivered ({fraud_rate:.1f}% fraud)")
+        
+        agency_summary = "\n".join(agency_lines) if agency_lines else "No data"
+        
+        message = {
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"📊 Monthly Attribution Report — {report_month}",
+                        "emoji": True
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*Overall Totals*\n"
+                                f"• Delivered Events: *{total_delivered:,}*\n"
+                                f"• Fraud Events (P360): *{total_fraud:,}* ({overall_fraud_rate:.1f}%)\n"
+                                f"• Flagged Events: *{total_flagged:,}* ({overall_flag_rate:.1f}%)\n"
+                                f"• Net Valid Events: *{total_net_valid:,}*"
+                    }
+                },
+                {
+                    "type": "divider"
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*Top Agencies by Net Valid*\n{agency_summary}"
+                    }
+                },
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"Event: `{EVENT_NAME}` | Full Excel report generated"
+                        }
+                    ]
+                }
+            ]
+        }
     
     response = requests.post(
         SLACK_WEBHOOK_URL,
@@ -534,7 +600,10 @@ def main():
     delivered_df = apply_flagging_rules(delivered_df)
     
     # Separate flagged events
-    flagged_events_df = delivered_df[delivered_df["is_flagged"] == True].copy()
+    if not delivered_df.empty and "is_flagged" in delivered_df.columns:
+        flagged_events_df = delivered_df[delivered_df["is_flagged"] == True].copy()
+    else:
+        flagged_events_df = pd.DataFrame()
     
     print(f"Flagged events: {len(flagged_events_df)}")
     
@@ -548,44 +617,66 @@ def main():
     flagged_agg = aggregate_by_agency(flagged_events_df, "flagged")
     
     # Add flag reason breakdown to flagged aggregation
-    if not flagged_events_df.empty:
+    if not flagged_events_df.empty and "flag_reason" in flagged_events_df.columns:
         flagged_by_reason = flagged_events_df.groupby(
             ["agency_normalized", "flag_reason"]
         ).size().reset_index(name="count")
         flagged_by_reason = flagged_by_reason.rename(columns={"agency_normalized": "agency"})
-        flagged_agg = flagged_agg.merge(
-            flagged_by_reason.pivot(index="agency", columns="flag_reason", values="count").reset_index(),
-            on="agency",
-            how="left"
-        ).fillna(0)
+        
+        pivot_df = flagged_by_reason.pivot(index="agency", columns="flag_reason", values="count").reset_index()
+        flagged_agg = flagged_agg.merge(pivot_df, on="agency", how="left").fillna(0)
     
-    # Build summary
-    summary_df = delivered_agg.merge(fraud_agg, on="agency", how="left")
-    summary_df = summary_df.merge(flagged_agg[["agency", "flagged"]], on="agency", how="left")
-    summary_df = summary_df.fillna(0)
-    
-    # Calculate net valid
-    summary_df["net_valid"] = (
-        summary_df["delivered"] - summary_df["fraud"] - summary_df["flagged"]
-    ).astype(int)
-    
-    # Calculate rates
-    summary_df["fraud_rate_%"] = (
-        summary_df["fraud"] / summary_df["delivered"] * 100
-    ).round(1)
-    summary_df["flag_rate_%"] = (
-        summary_df["flagged"] / summary_df["delivered"] * 100
-    ).round(1)
-    
-    # Convert to int for cleaner display
-    for col in ["delivered", "fraud", "flagged", "net_valid"]:
-        summary_df[col] = summary_df[col].astype(int)
-    
-    # Sort by delivered descending
-    summary_df = summary_df.sort_values("delivered", ascending=False)
+    # Build summary - handle empty dataframes
+    if delivered_agg.empty:
+        summary_df = pd.DataFrame(columns=["agency", "delivered", "fraud", "flagged", "net_valid", "fraud_rate_%", "flag_rate_%"])
+    else:
+        summary_df = delivered_agg.copy()
+        
+        if not fraud_agg.empty:
+            summary_df = summary_df.merge(fraud_agg, on="agency", how="left")
+        else:
+            summary_df["fraud"] = 0
+            
+        if not flagged_agg.empty:
+            summary_df = summary_df.merge(flagged_agg[["agency", "flagged"]], on="agency", how="left")
+        else:
+            summary_df["flagged"] = 0
+        
+        summary_df = summary_df.fillna(0)
+        
+        # Ensure numeric types
+        for col in ["delivered", "fraud", "flagged"]:
+            if col in summary_df.columns:
+                summary_df[col] = pd.to_numeric(summary_df[col], errors='coerce').fillna(0)
+        
+        # Calculate net valid
+        summary_df["net_valid"] = (
+            summary_df["delivered"] - summary_df["fraud"] - summary_df["flagged"]
+        ).astype(int)
+        
+        # Calculate rates safely
+        summary_df["fraud_rate_%"] = summary_df.apply(
+            lambda row: round(row["fraud"] / row["delivered"] * 100, 1) if row["delivered"] > 0 else 0,
+            axis=1
+        )
+        summary_df["flag_rate_%"] = summary_df.apply(
+            lambda row: round(row["flagged"] / row["delivered"] * 100, 1) if row["delivered"] > 0 else 0,
+            axis=1
+        )
+        
+        # Convert to int for cleaner display
+        for col in ["delivered", "fraud", "flagged", "net_valid"]:
+            if col in summary_df.columns:
+                summary_df[col] = summary_df[col].astype(int)
+        
+        # Sort by delivered descending
+        summary_df = summary_df.sort_values("delivered", ascending=False)
     
     print("\nSummary:")
-    print(summary_df.to_string(index=False))
+    if summary_df.empty:
+        print("No data to summarize")
+    else:
+        print(summary_df.to_string(index=False))
     
     # Generate Excel report
     print("\n" + "-" * 40)
