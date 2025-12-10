@@ -384,29 +384,78 @@ def generate_grant_excel_report(grant_data, report_month):
 # =============================================================================
 
 def upload_file_to_slack(filepath, channel_id):
+    """
+    Upload a file to Slack using the new API flow (March 2025+).
+    
+    Step 1: Get upload URL via files.getUploadURLExternal
+    Step 2: Upload file to the URL
+    Step 3: Complete upload via files.completeUploadExternal
+    """
     if not SLACK_BOT_TOKEN or not channel_id:
         return None
     
-    url = "https://slack.com/api/files.upload"
+    filename = os.path.basename(filepath)
+    filesize = os.path.getsize(filepath)
+    
+    # Step 1: Get upload URL
+    url = "https://slack.com/api/files.getUploadURLExternal"
     headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}"}
     
-    with open(filepath, "rb") as f:
-        response = requests.post(
-            url, headers=headers,
-            data={"channels": channel_id, "filename": os.path.basename(filepath), "title": os.path.basename(filepath)},
-            files={"file": f}
-        )
+    response = requests.post(url, headers=headers, data={
+        "filename": filename,
+        "length": filesize
+    })
     
-    if response.status_code == 200:
-        result = response.json()
-        if result.get("ok"):
-            permalink = result.get("file", {}).get("permalink", "")
-            print(f"File uploaded to Slack successfully: {permalink}")
-            return permalink
+    if response.status_code != 200:
+        print(f"Slack getUploadURLExternal failed: {response.status_code}")
+        return None
+    
+    result = response.json()
+    if not result.get("ok"):
+        print(f"Slack getUploadURLExternal failed: {result.get('error')}")
+        return None
+    
+    upload_url = result.get("upload_url")
+    file_id = result.get("file_id")
+    
+    # Step 2: Upload file to the URL
+    with open(filepath, "rb") as f:
+        upload_response = requests.post(upload_url, files={"file": f})
+    
+    if upload_response.status_code != 200:
+        print(f"Slack file upload failed: {upload_response.status_code}")
+        return None
+    
+    # Step 3: Complete upload
+    complete_url = "https://slack.com/api/files.completeUploadExternal"
+    complete_response = requests.post(
+        complete_url,
+        headers={
+            "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "files": [{"id": file_id, "title": filename}],
+            "channel_id": channel_id
+        }
+    )
+    
+    if complete_response.status_code == 200:
+        complete_result = complete_response.json()
+        if complete_result.get("ok"):
+            # Get permalink from the response
+            files = complete_result.get("files", [])
+            if files:
+                permalink = files[0].get("permalink", "")
+                print(f"File uploaded to Slack successfully: {permalink}")
+                return permalink
+            print("File uploaded but no permalink returned")
+            return "uploaded"
         else:
-            print(f"Slack file upload failed: {result.get('error')}")
+            print(f"Slack completeUploadExternal failed: {complete_result.get('error')}")
     else:
-        print(f"Slack file upload failed: {response.status_code}")
+        print(f"Slack completeUploadExternal failed: {complete_response.status_code}")
+    
     return None
 
 
